@@ -1,0 +1,105 @@
+import { CustomFileCpu } from "@wxn0brp/db-core";
+import { CustomActionsBase } from "@wxn0brp/db-core/base/custom";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, scryptSync } from "crypto";
+import { existsSync, promises as fs, mkdirSync } from "fs";
+import { dirname, join } from "path";
+export class EncryptedAction extends CustomActionsBase {
+    folder;
+    options;
+    key;
+    constructor(folder, options) {
+        super();
+        this.folder = folder;
+        this.options = options;
+        this.fileCpu = new CustomFileCpu(this._read.bind(this), this._write.bind(this));
+        this.key = scryptSync(options.encryptionKey, options.salt, options.keylen ?? 32, options.options ?? {});
+        if (!existsSync(folder))
+            mkdirSync(folder, { recursive: true });
+    }
+    encrypt(data, collection) {
+        const collectionKey = createHmac("sha256", this.key)
+            .update(collection)
+            .digest();
+        const iv = randomBytes(12);
+        const cipher = createCipheriv("aes-256-gcm", collectionKey, iv);
+        cipher.setAAD(Buffer.from(collection));
+        const encrypted = Buffer.concat([
+            cipher.update(data),
+            cipher.final()
+        ]);
+        const authTag = cipher.getAuthTag();
+        return Buffer.concat([iv, authTag, encrypted]);
+    }
+    decrypt(payload, collection) {
+        if (payload.length < 28)
+            return Buffer.from("[]", "utf8");
+        const collectionKey = createHmac("sha256", this.key)
+            .update(collection)
+            .digest();
+        const iv = payload.subarray(0, 12);
+        const authTag = payload.subarray(12, 28);
+        const encrypted = payload.subarray(28);
+        const decipher = createDecipheriv("aes-256-gcm", collectionKey, iv);
+        decipher.setAuthTag(authTag);
+        decipher.setAAD(Buffer.from(collection));
+        return Buffer.concat([
+            decipher.update(encrypted),
+            decipher.final()
+        ]);
+    }
+    async _read(collection) {
+        const filePath = join(this.folder, collection + ".edb");
+        try {
+            const encContent = await fs.readFile(filePath);
+            const json = this.decrypt(encContent, collection).toString("utf8");
+            return JSON.parse(json);
+        }
+        catch (err) {
+            if (err.code === "ENOENT")
+                return [];
+            throw err;
+        }
+    }
+    async _write(collection, data) {
+        const json = JSON.stringify(data);
+        const encContent = this.encrypt(Buffer.from(json, "utf8"), collection);
+        const filePath = join(this.folder, collection + ".edb");
+        await fs.writeFile(filePath, encContent);
+    }
+    async getCollections() {
+        const files = await fs.readdir(this.folder, { recursive: true });
+        const collections = files
+            .filter(file => file.endsWith(".edb"))
+            .map(file => file.slice(0, -4));
+        return collections;
+    }
+    async ensureCollection({ collection }) {
+        if (await this.issetCollection({ collection }))
+            return;
+        const collectionFolder = join(this.folder, dirname(collection + ".edb"));
+        if (!existsSync(collectionFolder))
+            mkdirSync(collectionFolder, { recursive: true });
+        await this._write(collection, []);
+        return true;
+    }
+    async issetCollection({ collection }) {
+        const filePath = join(this.folder, collection + ".edb");
+        try {
+            await fs.access(filePath);
+            return true;
+        }
+        catch {
+            return false;
+        }
+    }
+    async removeCollection({ collection }) {
+        const filePath = join(this.folder, collection + ".edb");
+        try {
+            await fs.unlink(filePath);
+            return true;
+        }
+        catch {
+            return true;
+        }
+    }
+}
