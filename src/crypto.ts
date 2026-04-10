@@ -1,39 +1,43 @@
 import { CustomFileCpu } from "@wxn0brp/db-core";
 import { CustomActionsBase } from "@wxn0brp/db-core/base/custom";
 import { DbOpts } from "@wxn0brp/db-core/types/options";
-import { VQuery } from "@wxn0brp/db-core/types/query";
 import { createCipheriv, createDecipheriv, createHmac, randomBytes, ScryptOptions, scryptSync } from "crypto";
-import { existsSync, promises as fs, mkdirSync } from "fs";
+import { promises as fs } from "fs";
+import { mkdir } from "fs/promises";
 import { dirname, join } from "path";
+import { exists } from "./utils";
 
-export interface EncryptedActionOptions extends DbOpts {
+export interface EncryptedActionOptionsInternal {
     encryptionKey: string;
     salt: string;
     keylen?: number;
     options?: ScryptOptions;
 }
 
-export class EncryptedAction extends CustomActionsBase {
-    folder: string;
-    options: EncryptedActionOptions;
-    key: Buffer;
+export type EncryptedActionOptions = EncryptedActionOptionsInternal & Omit<DbOpts, "dbAction">;
 
-    constructor(folder: string, options: EncryptedActionOptions) {
+export class EncryptedAction extends CustomActionsBase {
+    key: Buffer;
+    _inited = false;
+
+    constructor(public folder: string, public options: EncryptedActionOptions) {
         super();
-        this.folder = folder;
-        this.options = options;
         this.fileCpu = new CustomFileCpu(this._read.bind(this), this._write.bind(this));
+
         this.key = scryptSync(
             options.encryptionKey,
             options.salt,
             options.keylen ?? 32,
             options.options ?? {}
         );
-
-        if (!existsSync(folder)) mkdirSync(folder, { recursive: true });
     }
 
-    private encrypt(data: Buffer, collection: string): Buffer {
+    async init() {
+        if (!await exists(this.folder))
+            await mkdir(this.folder, { recursive: true });
+    }
+
+    _encrypt(data: Buffer, collection: string): Buffer {
         const collectionKey = createHmac("sha256", this.key)
             .update(collection)
             .digest();
@@ -52,7 +56,7 @@ export class EncryptedAction extends CustomActionsBase {
         return Buffer.concat([iv, authTag, encrypted]);
     }
 
-    private decrypt(payload: Buffer, collection: string): Buffer {
+    _decrypt(payload: Buffer, collection: string): Buffer {
         if (payload.length < 28) return Buffer.from("[]", "utf8");
 
         const collectionKey = createHmac("sha256", this.key)
@@ -73,11 +77,11 @@ export class EncryptedAction extends CustomActionsBase {
         ]);
     }
 
-    private async _read(collection: string): Promise<any[]> {
+    async _read(collection: string): Promise<any[]> {
         const filePath = join(this.folder, collection + ".edb");
         try {
             const encContent = await fs.readFile(filePath);
-            const json = this.decrypt(encContent, collection).toString("utf8");
+            const json = this._decrypt(encContent, collection).toString("utf8");
             return JSON.parse(json);
         } catch (err) {
             if ((err as any).code === "ENOENT") return [];
@@ -85,9 +89,9 @@ export class EncryptedAction extends CustomActionsBase {
         }
     }
 
-    private async _write(collection: string, data: any[]): Promise<void> {
+    async _write(collection: string, data: any[]): Promise<void> {
         const json = JSON.stringify(data);
-        const encContent = this.encrypt(Buffer.from(json, "utf8"), collection);
+        const encContent = this._encrypt(Buffer.from(json, "utf8"), collection);
         const filePath = join(this.folder, collection + ".edb");
         await fs.writeFile(filePath, encContent);
     }
@@ -100,17 +104,17 @@ export class EncryptedAction extends CustomActionsBase {
         return collections;
     }
 
-    async ensureCollection({ collection }: VQuery) {
-        if (await this.issetCollection({ collection })) return;
+    async ensureCollection(collection: string) {
+        if (await this.issetCollection(collection)) return false;
 
         const collectionFolder = join(this.folder, dirname(collection + ".edb"));
-        if (!existsSync(collectionFolder)) mkdirSync(collectionFolder, { recursive: true });
+        await mkdir(collectionFolder, { recursive: true });
 
         await this._write(collection, []);
         return true;
     }
 
-    async issetCollection({ collection }: VQuery) {
+    async issetCollection(collection: string) {
         const filePath = join(this.folder, collection + ".edb");
         try {
             await fs.access(filePath);
@@ -120,7 +124,7 @@ export class EncryptedAction extends CustomActionsBase {
         }
     }
 
-    async removeCollection({ collection }: VQuery) {
+    async removeCollection(collection: string) {
         const filePath = join(this.folder, collection + ".edb");
         try {
             await fs.unlink(filePath);

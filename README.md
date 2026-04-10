@@ -14,11 +14,7 @@ This library ensures that all data persisted to disk is encrypted using modern, 
 ## Installation
 
 ```bash
-bun add @wxn0brp/db-storage-crypt
-# or
 npm install @wxn0brp/db-storage-crypt
-# or
-yarn add @wxn0brp/db-storage-crypt
 ```
 
 You also need to have `@wxn0brp/db-core` installed.
